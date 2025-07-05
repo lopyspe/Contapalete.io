@@ -72,7 +72,6 @@
     <script>
         // --- CONFIGURAÇÕES ---
         const ROBOFLOW_API_KEY = "rf_yg0YURQXhzVFI6ChyOgQh9jWaK42"; // Sua Chave Publicável
-        // ATUALIZADO: Novo ID do modelo e versão
         const ROBOFLOW_MODEL_ID = "my-first-project-ekitz/3";
 
         // --- ELEMENTOS DA PÁGINA ---
@@ -128,8 +127,9 @@
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: {
                     facingMode: 'environment', // Pede a câmera traseira
-                    width: { ideal: 1280 },
-                    height: { ideal: 720 }
+                    // ALTERADO: Reduzida a resolução para melhorar a performance
+                    width: { ideal: 640 },
+                    height: { ideal: 480 }
                 }
             });
             video.srcObject = stream;
