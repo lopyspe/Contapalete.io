@@ -73,6 +73,8 @@
         // --- CONFIGURAÇÕES ---
         const ROBOFLOW_API_KEY = "rf_yg0YURQXhzVFI6ChyOgQh9jWaK42"; // Sua Chave Publicável
         const ROBOFLOW_MODEL_ID = "my-first-project-ekitz/3";
+        // NOVO: Intervalo em milissegundos entre cada detecção. Aumente para mais performance.
+        const DETECTION_INTERVAL_MS = 250; 
 
         // --- ELEMENTOS DA PÁGINA ---
         const video = document.getElementById('video');
@@ -82,42 +84,36 @@
         const statusDiv = document.getElementById('status');
 
         let model;
+        // NOVO: Armazena as últimas predições para serem desenhadas pelo loop de renderização.
+        let latestPredictions = [];
 
         // --- FUNÇÃO PRINCIPAL ---
         async function main() {
             try {
                 statusDiv.innerText = "Carregando modelo do Roboflow...";
-                // Autentica
                 await roboflow.auth({ publishable_key: ROBOFLOW_API_KEY });
 
-                // Lógica de parsing do ID do modelo.
                 const modelParts = ROBOFLOW_MODEL_ID.split('/');
-                if (modelParts.length < 2) {
-                    throw new Error("Formato do ROBOFLOW_MODEL_ID inválido. Esperado: 'workspace/identificador-versao'");
-                }
-
-                const modelName = modelParts[0]; // Ex: "my-first-project-ekitz"
-                const modelVersion = modelParts[1]; // Ex: "3"
+                if (modelParts.length < 2) throw new Error("Formato do ROBOFLOW_MODEL_ID inválido.");
                 
-                // Carrega o modelo com os dados extraídos
+                const modelName = modelParts[0];
+                const modelVersion = modelParts[1];
+                
                 console.log(`Tentando carregar modelo: '${modelName}', versão: '${modelVersion}'`);
-                model = await roboflow.load({
-                    model: modelName,
-                    version: modelVersion
-                });
+                model = await roboflow.load({ model: modelName, version: modelVersion });
                 console.log("Modelo carregado com sucesso!");
 
-
-                // Configura e inicia a câmera
                 await setupCamera();
                 video.play();
-                statusDiv.style.display = 'none'; // Esconde o status após carregar
+                statusDiv.style.display = 'none';
                 
-                // Inicia o loop de detecção
-                detectFrame();
+                // ALTERADO: Inicia dois loops independentes.
+                renderLoop(); // Loop para desenhar o vídeo (rápido)
+                detectionLoop(); // Loop para detectar objetos (mais lento)
+
             } catch (error) {
                 console.error("Erro na inicialização:", error);
-                statusDiv.innerText = `Erro: ${error.message}. Verifique o console para mais detalhes.`;
+                statusDiv.innerText = `Erro: ${error.message}. Verifique o console.`;
             }
         }
 
@@ -126,8 +122,7 @@
             statusDiv.innerText = "Acessando a câmera traseira...";
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    facingMode: 'environment', // Pede a câmera traseira
-                    // ALTERADO: Reduzida a resolução para melhorar a performance
+                    facingMode: 'environment',
                     width: { ideal: 640 },
                     height: { ideal: 480 }
                 }
@@ -137,7 +132,6 @@
             return new Promise((resolve) => {
                 video.onloadedmetadata = () => {
                     console.log("Câmera pronta.");
-                    // Ajusta o tamanho do canvas para o tamanho do vídeo
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     resolve();
@@ -145,33 +139,40 @@
             });
         }
 
-        // --- LOOP DE DETECÇÃO ---
-        async function detectFrame() {
+        // --- NOVO LOOP DE RENDERIZAÇÃO ---
+        // Este loop roda o mais rápido possível para manter o vídeo fluido.
+        function renderLoop() {
+            // Limpa o canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // Desenha o frame atual do vídeo
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            // Desenha as últimas caixas de detecção que temos
+            drawBoundingBoxes(latestPredictions);
+            // Agenda o próximo quadro
+            requestAnimationFrame(renderLoop);
+        }
+
+        // --- NOVO LOOP DE DETECÇÃO ---
+        // Este loop roda em um intervalo fixo para não sobrecarregar o processador.
+        async function detectionLoop() {
             if (!model) return;
 
-            // Limpa o canvas antes de desenhar
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
-            // Desenha o frame atual do vídeo no canvas (para visualização)
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-            // Roda a detecção no elemento de vídeo para melhor performance
+            // Roda a detecção
             const predictions = await model.detect(video);
             
+            // Armazena as predições para o loop de renderização usar
+            latestPredictions = predictions;
+
             // Atualiza o contador
             counterDiv.innerText = `Paletes: ${predictions.length}`;
             
-            // Desenha as caixas de detecção
-            drawBoundingBoxes(predictions);
-
-            // Chama a próxima detecção no próximo quadro de animação
-            requestAnimationFrame(detectFrame);
+            // Agenda a próxima detecção após o intervalo definido
+            setTimeout(detectionLoop, DETECTION_INTERVAL_MS);
         }
 
         // --- DESENHA AS CAIXAS DE DETECÇÃO ---
         function drawBoundingBoxes(predictions) {
             predictions.forEach(p => {
-                // Ajusta as coordenadas para o tamanho do canvas
                 const scaleX = canvas.width / video.videoWidth;
                 const scaleY = canvas.height / video.videoHeight;
 
@@ -180,23 +181,19 @@
                 const width = p.width * scaleX;
                 const height = p.height * scaleY;
                 
-                // Estilo da caixa
                 ctx.strokeStyle = p.color || '#00FF00';
                 ctx.lineWidth = 4;
                 ctx.strokeRect(x, y, width, height);
 
-                // Estilo do texto
                 ctx.font = 'bold 20px Arial';
                 ctx.textBaseline = 'bottom';
                 
                 const label = `${p.class} (${Math.round(p.confidence * 100)}%)`;
                 const textWidth = ctx.measureText(label).width;
                 
-                // Desenha um fundo para o texto
                 ctx.fillStyle = p.color || '#00FF00';
                 ctx.fillRect(x, y, textWidth + 10, -25);
                 
-                // Desenha o texto
                 ctx.fillStyle = 'white';
                 ctx.fillText(label, x + 5, y);
             });
