@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Contador de Paletes em Tempo Real</title>
     <style>
-        /* Adicionada animação para o feedback de processamento */
         @keyframes pulse-border {
             0% { border-color: #007bff; }
             50% { border-color: #66b0ff; }
@@ -26,6 +25,33 @@
             box-sizing: border-box;
             overflow: hidden;
         }
+        
+        /* NOVO: Container para os botões de seleção inicial */
+        #selection-container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            width: 100%;
+            max-width: 400px;
+        }
+        
+        .selection-btn {
+            padding: 20px;
+            font-size: 1.2em;
+            font-weight: bold;
+            border-radius: 10px;
+            border: 2px solid #007bff;
+            background-color: #007bff;
+            color: white;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.2s;
+        }
+
+        .selection-btn:hover {
+            background-color: #0056b3;
+            transform: scale(1.02);
+        }
+
         #video-container {
             position: relative;
             width: 100%;
@@ -46,7 +72,10 @@
             height: 100%;
         }
         video {
-            display: none; 
+            /* O vídeo será controlado via JS para ser exibido quando necessário */
+            max-width: 100%;
+            max-height: 100%;
+            border-radius: 10px;
         }
         #counter {
             width: 100%;
@@ -75,15 +104,23 @@
     </style>
 </head>
 <body>
+    <!-- NOVO: Tela de seleção inicial -->
+    <div id="selection-container">
+        <button id="start-camera-btn" class="selection-btn">Usar Câmera em Tempo Real</button>
+        <button id="select-file-btn" class="selection-btn">Analisar Imagem/Vídeo da Galeria</button>
+        <input type="file" id="file-input" accept="image/*,video/*" style="display: none;">
+    </div>
 
-    <div id="video-container">
+    <!-- Container do vídeo/canvas, inicialmente oculto -->
+    <div id="video-container" style="display: none;">
         <video id="video" autoplay muted playsinline></video>
         <canvas id="canvas"></canvas>
     </div>
 
-    <div id="counter">Paletes: 0</div>
+    <!-- Contador, inicialmente oculto -->
+    <div id="counter" style="display: none;">Paletes: 0</div>
 
-    <div id="status">Iniciando câmera...</div>
+    <div id="status" style="display: none;">Iniciando...</div>
 
     <script src="https://cdn.roboflow.com/0.2.26/roboflow.js"></script>
     <script>
@@ -93,6 +130,12 @@
         const DETECTION_INTERVAL_MS = 500; 
 
         // --- ELEMENTOS DA PÁGINA ---
+        const selectionContainer = document.getElementById('selection-container');
+        const startCameraBtn = document.getElementById('start-camera-btn');
+        const selectFileBtn = document.getElementById('select-file-btn');
+        const fileInput = document.getElementById('file-input');
+
+        const videoContainer = document.getElementById('video-container');
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
@@ -102,36 +145,87 @@
         let model;
         let latestPredictions = [];
         let isDetecting = false;
+        let renderLoopId; // Para controlar o loop de renderização
 
-        // --- FUNÇÃO PRINCIPAL ---
-        async function main() {
+        // --- INICIALIZAÇÃO DOS BOTÕES ---
+        startCameraBtn.onclick = () => startMode('camera');
+        selectFileBtn.onclick = () => fileInput.click();
+        fileInput.onchange = (event) => {
+            const file = event.target.files[0];
+            if (file) {
+                startMode('file', file);
+            }
+        };
+
+        // --- FUNÇÃO PARA INICIAR O MODO ESCOLHIDO ---
+        async function startMode(mode, file = null) {
+            // Esconde a seleção e mostra a interface principal
+            selectionContainer.style.display = 'none';
+            videoContainer.style.display = 'flex';
+            counterDiv.style.display = 'block';
+            statusDiv.style.display = 'block';
+            statusDiv.innerText = "Carregando modelo do Roboflow...";
+
             try {
-                statusDiv.innerText = "Carregando modelo do Roboflow...";
-                await roboflow.auth({ publishable_key: ROBOFLOW_API_KEY });
+                await initModel(); // Garante que o modelo seja carregado
+                statusDiv.innerText = "Modelo carregado. Preparando mídia...";
 
-                const modelParts = ROBOFLOW_MODEL_ID.split('/');
-                if (modelParts.length < 2) throw new Error("Formato do ROBOFLOW_MODEL_ID inválido.");
-                
-                const modelName = modelParts[0];
-                const modelVersion = modelParts[1];
-                
-                console.log(`Tentando carregar modelo: '${modelName}', versão: '${modelVersion}'`);
-                model = await roboflow.load({ model: modelName, version: modelVersion });
-                console.log("Modelo carregado com sucesso!");
-
-                await setupCamera();
-                video.play();
+                if (mode === 'camera') {
+                    await setupCamera();
+                    video.play();
+                    renderLoop();
+                    detectionLoop();
+                } else if (mode === 'file') {
+                    await handleFile(file);
+                }
                 statusDiv.style.display = 'none';
-                
-                renderLoop();
-                detectionLoop();
-
             } catch (error) {
-                console.error("Erro na inicialização:", error);
-                counterDiv.style.backgroundColor = '#d93025';
-                counterDiv.style.fontSize = '1em';
-                counterDiv.innerText = `Erro: ${error.message}.`;
-                statusDiv.style.display = 'none';
+                handleError(error);
+            }
+        }
+
+        // --- INICIALIZAÇÃO DO MODELO (SÓ RODA UMA VEZ) ---
+        async function initModel() {
+            if (model) return; // Se o modelo já foi carregado, não faz nada
+            await roboflow.auth({ publishable_key: ROBOFLOW_API_KEY });
+            const modelParts = ROBOFLOW_MODEL_ID.split('/');
+            if (modelParts.length < 2) throw new Error("Formato do ROBOFLOW_MODEL_ID inválido.");
+            const modelName = modelParts[0];
+            const modelVersion = modelParts[1];
+            console.log(`Tentando carregar modelo: '${modelName}', versão: '${modelVersion}'`);
+            model = await roboflow.load({ model: modelName, version: modelVersion });
+            console.log("Modelo carregado com sucesso!");
+        }
+
+        // --- LIDA COM ARQUIVO DA GALERIA ---
+        async function handleFile(file) {
+            const fileURL = URL.createObjectURL(file);
+            if (file.type.startsWith('image/')) {
+                const img = new Image();
+                img.src = fileURL;
+                img.onload = async () => {
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    ctx.drawImage(img, 0, 0);
+                    counterDiv.classList.add('processing');
+                    const predictions = await model.detect(canvas);
+                    latestPredictions = predictions;
+                    drawBoundingBoxes(predictions); // Desenha as caixas na imagem
+                    counterDiv.innerText = `Paletes: ${predictions.length}`;
+                    counterDiv.classList.remove('processing');
+                };
+            } else if (file.type.startsWith('video/')) {
+                video.src = fileURL;
+                video.muted = false;
+                video.controls = true; // Mostra controles para o vídeo
+                video.style.display = 'block'; // Mostra o elemento de vídeo
+                canvas.style.display = 'block'; // Garante que o canvas esteja visível
+                
+                video.onloadedmetadata = () => {
+                    resizeCanvas();
+                    renderLoop();
+                    detectionLoop();
+                };
             }
         }
 
@@ -139,92 +233,84 @@
         async function setupCamera() {
             statusDiv.innerText = "Acessando a câmera traseira...";
             const stream = await navigator.mediaDevices.getUserMedia({
-                video: {
-                    facingMode: 'environment',
-                    width: { ideal: 640 },
-                    height: { ideal: 480 }
-                }
+                video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
             });
             video.srcObject = stream;
-            
-            return new Promise((resolve) => {
+            video.style.display = 'none'; // Esconde o vídeo quando a câmera está ativa
+            canvas.style.display = 'block';
+            return new Promise(resolve => {
                 video.onloadedmetadata = () => {
-                    console.log("Câmera pronta.");
-                    const videoRatio = video.videoWidth / video.videoHeight;
-                    const container = document.getElementById('video-container');
-                    const containerRatio = container.clientWidth / container.clientHeight;
-
-                    if (videoRatio > containerRatio) {
-                        canvas.width = container.clientWidth;
-                        canvas.height = container.clientWidth / videoRatio;
-                    } else {
-                        canvas.height = container.clientHeight;
-                        canvas.width = container.clientHeight * videoRatio;
-                    }
+                    resizeCanvas();
                     resolve();
                 };
             });
         }
 
-        // --- LOOP DE RENDERIZAÇÃO (RÁPIDO) ---
+        function resizeCanvas() {
+            const videoRatio = video.videoWidth / video.videoHeight;
+            const containerRatio = videoContainer.clientWidth / videoContainer.clientHeight;
+            if (videoRatio > containerRatio) {
+                canvas.width = videoContainer.clientWidth;
+                canvas.height = videoContainer.clientWidth / videoRatio;
+            } else {
+                canvas.height = videoContainer.clientHeight;
+                canvas.width = videoContainer.clientHeight * videoRatio;
+            }
+        }
+
+        // --- LOOPS DE RENDERIZAÇÃO E DETECÇÃO ---
         function renderLoop() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             drawBoundingBoxes(latestPredictions);
-            requestAnimationFrame(renderLoop);
+            renderLoopId = requestAnimationFrame(renderLoop);
         }
 
-        // --- LOOP DE DETECÇÃO (CONTROLADO) ---
         async function detectionLoop() {
-            if (model && !isDetecting) {
+            if (model && !isDetecting && !video.paused) {
                 isDetecting = true;
                 counterDiv.classList.add('processing');
-
                 const predictions = await model.detect(video);
                 latestPredictions = predictions;
                 counterDiv.innerText = `Paletes: ${predictions.length}`;
-
                 counterDiv.classList.remove('processing');
                 isDetecting = false;
             }
             setTimeout(detectionLoop, DETECTION_INTERVAL_MS);
         }
 
-        // --- DESENHA AS CAIXAS DE DETECÇÃO (DEMARCAÇÃO) ---
+        // --- DESENHA AS CAIXAS DE DETECÇÃO ---
         function drawBoundingBoxes(predictions) {
+            const scaleX = canvas.width / (video.videoWidth || canvas.width);
+            const scaleY = canvas.height / (video.videoHeight || canvas.height);
             predictions.forEach(p => {
-                const scaleX = canvas.width / video.videoWidth;
-                const scaleY = canvas.height / video.videoHeight;
-
                 const x = p.x * scaleX;
                 const y = p.y * scaleY;
                 const width = p.width * scaleX;
                 const height = p.height * scaleY;
                 
-                // ALTERADO: Cor da demarcação mudada para vermelho
-                ctx.strokeStyle = p.color || '#FF4136'; // Vermelho vibrante
-                ctx.lineWidth = 10;
+                ctx.strokeStyle = '#FF4136';
+                ctx.lineWidth = 5;
                 ctx.strokeRect(x, y, width, height);
-
-                // Estilo do texto
                 ctx.font = 'bold 20px Arial';
                 ctx.textBaseline = 'bottom';
-                
                 const label = `${p.class} (${Math.round(p.confidence * 100)}%)`;
                 const textWidth = ctx.measureText(label).width;
-                
-                // ALTERADO: Cor do fundo do texto mudada para vermelho
-                ctx.fillStyle = p.color || '#FF4136';
+                ctx.fillStyle = '#FF4136';
                 ctx.fillRect(x, y, textWidth + 10, -25);
-                
-                // Cor do texto
                 ctx.fillStyle = 'white';
                 ctx.fillText(label, x + 5, y);
             });
         }
-
-        // Inicia todo o processo
-        main();
+        
+        // --- FUNÇÃO DE ERRO ---
+        function handleError(error) {
+            console.error("Erro:", error);
+            counterDiv.style.backgroundColor = '#d93025';
+            counterDiv.style.fontSize = '1em';
+            counterDiv.innerText = `Erro: ${error.message}.`;
+            statusDiv.style.display = 'none';
+        }
 
     </script>
 </body>
